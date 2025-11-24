@@ -459,6 +459,226 @@ async def cmd_list(message: Message):
     text += f"\n<b>Всего записей:</b> {len(schedule_data)}"
     await message.answer(text, parse_mode="HTML")
 
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Только для администраторов")
+        return
+
+    total_records = len(schedule_data)
+    unique_classes = get_unique_classes()
+    unique_subjects = set(item['предмет'] for item in schedule_data)
+    
+    # Подсчет предметов по классам
+    class_stats = ""
+    for cls in unique_classes:
+        count = sum(1 for item in schedule_data if item['класс'] == cls)
+        class_stats += f"• {cls}: {count} записей\n"
+
+    text = (
+        f"📊 <b>Статистика базы данных</b>\n\n"
+        f"📚 Всего записей: <b>{total_records}</b>\n"
+        f"🏫 Классов в базе: <b>{len(unique_classes)}</b>\n"
+        f"📝 Уникальных предметов: <b>{len(unique_subjects)}</b>\n\n"
+        f"<b>Детализация по классам:</b>\n"
+        f"{class_stats}"
+    )
+    
+    await message.answer(text, parse_mode="HTML")
+
+# ========== УДАЛЕНИЕ ЗАПИСЕЙ ==========
+
+@dp.message(Command("delete"))
+async def cmd_delete(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав администратора")
+        return
+
+    if not schedule_data:
+        await message.answer("📭 База данных пуста, удалять нечего.")
+        return
+
+    # Формируем список для удаления
+    text = "🗑 <b>Удаление записи</b>\n\nВведите <b>номер</b> записи, которую хотите удалить:\n\n"
+    for i, entry in enumerate(schedule_data, 1):
+        text += f"<b>{i}.</b> {entry['класс']} | {entry['предмет']} | {entry['полугодие']} п/г\n"
+
+    await message.answer(text, parse_mode="HTML")
+    await state.set_state(AdminStates.deleting_record)
+
+
+@dp.message(AdminStates.deleting_record)
+async def process_delete_record(message: Message, state: FSMContext):
+    try:
+        index = int(message.text) - 1
+        
+        if 0 <= index < len(schedule_data):
+            removed = schedule_data.pop(index)
+            save_data()
+            await message.answer(
+                f"✅ <b>Успешно удалено:</b>\n"
+                f"{removed['класс']} - {removed['предмет']}",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Неверный номер записи. Попробуйте /delete снова.")
+            
+    except ValueError:
+        await message.answer("❌ Введите число.")
+    
+    await state.clear()
+# ========== РЕДАКТИРОВАНИЕ ЗАПИСЕЙ ==========
+
+@dp.message(Command("edit"))
+async def cmd_edit(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав администратора")
+        return
+
+    if not schedule_data:
+        await message.answer("📭 База данных пуста.")
+        return
+
+    text = "✏️ <b>Редактирование записи</b>\n\nВведите <b>номер</b> записи для изменения:\n\n"
+    for i, entry in enumerate(schedule_data, 1):
+        text += f"<b>{i}.</b> {entry['класс']} | {entry['предмет']} | {entry['полугодие']} п/г\n"
+
+    await message.answer(text, parse_mode="HTML")
+    await state.set_state(AdminStates.editing_select_record)
+
+
+@dp.message(AdminStates.editing_select_record)
+async def process_edit_select(message: Message, state: FSMContext):
+    try:
+        index = int(message.text) - 1
+        if 0 <= index < len(schedule_data):
+            # Сохраняем индекс выбранной записи
+            await state.update_data(edit_index=index)
+            
+            # Клавиатура выбора поля
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Класс", callback_data="edit_field:класс")],
+                [InlineKeyboardButton(text="Полугодие", callback_data="edit_field:полугодие")],
+                [InlineKeyboardButton(text="Предмет", callback_data="edit_field:предмет")],
+                [InlineKeyboardButton(text="Информация", callback_data="edit_field:информация")],
+            ])
+            
+            record = schedule_data[index]
+            await message.answer(
+                f"Выбрана запись:\n"
+                f"📌 {record['класс']}, {record['предмет']}\n\n"
+                f"Что вы хотите изменить?",
+                reply_markup=keyboard
+            )
+            await state.set_state(AdminStates.editing_field)
+        else:
+            await message.answer("❌ Неверный номер.")
+            await state.clear()
+    except ValueError:
+        await message.answer("❌ Введите число.")
+
+
+@dp.callback_query(AdminStates.editing_field, F.data.startswith("edit_field:"))
+async def process_edit_field_choice(callback: CallbackQuery, state: FSMContext):
+    field = callback.data.split(":")[1]
+    await state.update_data(edit_field=field)
+    
+    await callback.message.edit_text(
+        f"Введите новое значение для поля <b>{field.upper()}</b>:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.editing_value)
+    await callback.answer()
+
+
+@dp.message(AdminStates.editing_value)
+async def process_edit_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    index = data['edit_index']
+    field = data['edit_field']
+    new_value = message.text.strip()
+    
+    # Обновляем данные
+    old_value = schedule_data[index][field]
+    schedule_data[index][field] = new_value
+    save_data()
+    
+    await message.answer(
+        f"✅ <b>Запись обновлена!</b>\n\n"
+        f"Было: {old_value}\n"
+        f"Стало: {new_value}",
+        parse_mode="HTML"
+    )
+    await state.clear()
+# ========== ПОИСК И СТАТИСТИКА ==========
+
+@dp.message(Command("search"))
+async def cmd_search(message: Message):
+    # Получаем аргументы после команды (например, "9А" из "/search 9А")
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        await message.answer(
+            "🔍 <b>Поиск по базе</b>\n"
+            "Использование: <code>/search запрос</code>\n"
+            "Пример: /search Математика или /search Иванов",
+            parse_mode="HTML"
+        )
+        return
+
+    query = args[1].lower()
+    found_records = []
+
+    # Ищем совпадения во всех полях
+    for entry in schedule_data:
+        if (query in entry['класс'].lower() or 
+            query in entry['предмет'].lower() or 
+            query in entry['информация'].lower()):
+            found_records.append(entry)
+
+    if not found_records:
+        await message.answer(f"😔 По запросу «{args[1]}» ничего не найдено.")
+        return
+
+    text = f"🔎 <b>Найдено записей: {len(found_records)}</b>\n\n"
+    for entry in found_records:
+        text += (
+            f"🔹 <b>{entry['класс']}</b> ({entry['полугодие']} п/г) — {entry['предмет']}\n"
+            f"└ {entry['информация'][:50]}...\n\n" # Обрезаем длинный текст
+        )
+    
+    await message.answer(text, parse_mode="HTML")
+    
+# ========== СПРАВКА ==========
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    user_id = message.from_user.id
+    
+    # Текст для обычных пользователей
+    user_text = (
+        "🤖 <b>Справка по боту</b>\n\n"
+        "/start - Начать работу (выбор класса)\n"
+        "/search - Поиск (например: /search физика)\n"
+        "/help - Показать это сообщение"
+    )
+    
+    # Текст для администраторов
+    admin_text = (
+        "\n\n⚙️ <b>Команды администратора:</b>\n"
+        "/add - Добавить новую запись\n"
+        "/delete - Удалить запись по номеру\n"
+        "/edit - Редактировать запись\n"
+        "/list - Список всех записей\n"
+        "/stats - Статистика базы\n"
+        "/addadmin - Назначить нового админа\n"
+        "/removeadmin - Разжаловать админа\n"
+        "/listadmins - Список всех админов"
+    )
+    
+    final_text = user_text + (admin_text if is_admin(user_id) else "")
+    
+    await message.answer(final_text, parse_mode="HTML")
 
 # Запуск бота
 async def main():
