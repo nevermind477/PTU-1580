@@ -218,7 +218,8 @@ async def process_subject_selection(callback: CallbackQuery, state: FSMContext):
         f"📅 Полугодие: {semester}\n"
         f"📝 Предмет: {subject}\n\n"
         f"ℹ️ Информация:\n{info}",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
     await callback.answer()
 
